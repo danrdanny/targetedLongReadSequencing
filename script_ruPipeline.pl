@@ -62,11 +62,21 @@ close INF;
 
 my($sampleName) = $sampleSheet =~ /sampleName\s\=\s\"(\S+)\"/;
 my($readVer)    = $sampleSheet =~ /readVer\s\=\s\"(\S+)\"/;
-my($fastqData)  = $sampleSheet =~ /fastqFile\s\=\s\[(.+)\]/;
+my($fastqData,$geneData,$analysisRegion);
 
-$sampleSheet =~ s/\,//g;
-$sampleSheet =~ s/\n/,/g;
-my($geneData)   = $sampleSheet =~ /genesTargeted\s\=\s\[(.+)\]/;
+foreach my $foo (split /\]/, $sampleSheet) {
+	if ($foo =~ /fastqFile/) {
+		($fastqData) = $foo =~ /fastqFile\s\=\s\[(.+)/;
+	} elsif ($foo =~ /genesTargeted/) {
+		$foo =~ s/(\,|\])//g;
+		$foo =~ s/\n/,/g;
+		($geneData) = $foo =~ /genesTargeted\s\=\s\[(.+)/;
+	} elsif ($foo =~ /analysisRegion/) {
+		$foo =~ s/(\,|\])//g;
+		$foo =~ s/\n/,/g;
+		($analysisRegion) = $foo =~ /analysisRegion\s\=\s\[(.+)/;
+	}
+}
 
 foreach my $foo (split /\,/, $fastqData) {
 	$foo =~ s/\"|\s+//g;
@@ -81,8 +91,11 @@ $fastq{"fileList"} =~ s/\,\s$//;
 print "Please confirm\n
 Sample name: 	$sampleName
 Read version:	$readVer
-Fastq list: 	$fastq{'fileList'}\n";
+Fastq list: 	$fastq{'fileList'}
+\n";
 
+## Genes targeted
+print "Genes targeted:\n";
 foreach my $foo (split /\,/, $geneData) {
 	next unless $foo =~ /[a-z]/i;
 	my(@D) = split /\t/, $foo;
@@ -102,8 +115,24 @@ foreach my $foo (split /\,/, $geneData) {
 
 	print "\t$D[0]\t$geneList{$D[0]}{'regionToAnalyze'}\n";
 }
+print "Total: $geneCount\n";
+print "\n";
 
-print "Total genes targeted:	$geneCount\n";
+## Analysis region
+print "Analysis regions:\n";
+foreach my $foo (split /\,/, $analysisRegion) {
+	next unless $foo =~ /[a-z]/i;
+	my(@D) = split /\t/, $foo;
+	
+	$D[0] =~ s/\s+//g;
+	$D[1] =~ s/\s+//g;
+	$D[2] =~ s/\s+//g;
+	$D[3] =~ s/\s+//g;
+	
+	push @{$geneList{'analysisRegion'}}, "$D[0]|$D[1]:$D[2]-$D[3]";
+	print "\t$D[0]\t$D[1]:$D[2]-$D[3]\n";
+}
+print "\n";
 print "\n";
 
 
@@ -478,12 +507,15 @@ if ($opts{'r'}) {
 		my(@F) = split /\t/, $_;
 
 		next unless $geneList{$F[1]};
-
 		$geneTargets{$F[1]} = "$F[0]:$F[3]-$F[4]";
-	
-		#print "$F[1]\t$F[0]:$F[3]-$F[4]\n";
 	}
 	close INF;
+
+	# targetRegion and analysisRegion are different. analysisRegion may be deletions within a target region
+	foreach my $i ( 0 .. $#{ $geneList{'analysisRegion'} } ) {
+		my($region,$chr,$start,$end) = $geneList{'analysisRegion'}[$i] =~ /(\S+)\|(\S+)\:(\d+)\-(\d+)/;
+		$geneTargets{$region} = "$chr:$start-$end";
+	}
 
 	## Coverage ##
 	if (-e "$sampleName.coverage.1kbwindow.tsv") {
@@ -510,12 +542,13 @@ if ($opts{'r'}) {
 		print "Can't calc coverage as $sampleName.Coverage.1kbwindow.tsv is missing\n";
 	}
 
-	print "[".localtime()."] SUMMARY DATA\n";
+	print "##_SUMMARY_DATA\n";
+	print "Gene\tCoverage\tgeneRegion\tchr\tgeneStart\tgeneEnd\ttargetRegion\n";
 	foreach my $gene (keys %geneTargets) {
 		my($chr,$start,$end) = $geneTargets{$gene} =~ /(\S+)\:(\d+)\-(\d+)/;
 		print "$gene\t$coverage{$gene}\t$geneTargets{$gene}\t$chr\t$start\t$end\t$geneList{$gene}{'regionToAnalyze'}\n";
 	}
-	print "[".localtime()."] \n";
+	print "##\n";
 
 
 	## spliceAI output ##
@@ -524,7 +557,7 @@ if ($opts{'r'}) {
  		# indels -> spliceAI result + AF + caller + coverage
  		# cat spliceai.out | grep -v "#" | awk -F"|" '{ if ($3 > .2 || $4 > .2 || $5 > .2 || $6 > .2) print}'
 
-	print "[".localtime()."] Pulling data from spliceAI\n";
+	print "##_SpliceAI\n";
 
 	my %spliceaiin;
 	open INF,"$in_spliceai";
@@ -547,14 +580,23 @@ if ($opts{'r'}) {
 		my(@F) = split /\t/, $_;
 		next unless $F[7] =~ /SpliceAI/;
 		my($spliceAIout) = $F[7] =~ /SpliceAI\=(.+)/;
+
+		# only report variants within the region or gene of interest
+		my $skip = 1;
+		foreach my $gene (keys %geneTargets) {
+			my($chr,$start,$end) = $geneTargets{$gene} =~ /(\S+)\:(\d+)\-(\d+)/;
+			next unless $chr eq "chr$F[0]";
+			$skip = 0 if $F[1] >= $start && $F[1] <= $end;
+		}
+		next if $skip == 1;
 	
 		foreach my $foo (split /\,/, $spliceAIout) {
 			my(@D) = split /\|/, $foo;
 			my $gene = $D[1];
-
-			next unless $geneList{$D[1]};
-
 			my $skip = 1;
+
+			#next unless $geneList{$D[1]};
+
 			$skip = 0 if $D[2] >= $spliceaiCutoff;
 			$skip = 0 if $D[3] >= $spliceaiCutoff;
 			$skip = 0 if $D[4] >= $spliceaiCutoff;
@@ -566,21 +608,17 @@ if ($opts{'r'}) {
 		}
 	}
 	close INF;
-	print "[".localtime()."] \n";
-	print "[".localtime()."] SpliceAI done\n";
-	print "[".localtime()."] \n";
-
-
-	# 3. SVs: list events
-
+	print "##\n"; 
+	print "##_SV_Data\n"; 
 
 	## SVs ##
 
 	foreach my $gene (keys %geneList) {
-		print "[".localtime()."] SUMMARY: SV data for $gene\n";
-		my $chr = $geneList{$gene}{'chr'};
-		my $targetStart = $geneList{$gene}{'regionStart'};
-		my $targetEnd   = $geneList{$gene}{'regionEnd'};
+		print "##_SV_data_for_$gene\n";
+		#my $chr = $geneList{$gene}{'chr'};
+		#my $targetStart = $geneList{$gene}{'regionStart'};
+		#my $targetEnd   = $geneList{$gene}{'regionEnd'};
+		my($chr,$geneStart,$geneEnd) = $geneTargets{$gene} =~ /(\S+)\:(\d+)\-(\d+)/;
 
 		foreach my $svFile ($out_sniffles_minimap2,$out_sniffles_ngmlr,$out_svim_minimap2,$out_svim_ngmlr) {
 			
@@ -592,17 +630,17 @@ if ($opts{'r'}) {
 				next unless $chr eq $F[0];
 				next if $F[5] <= 2 && $svFile =~ /svim/;
 	
-				foreach my $pos ($targetStart..$targetEnd) {
+				foreach my $pos ($geneStart..$geneEnd) {
 					print "$gene\t$chr:$pos\t$svFile\t$_\n" if $pos == $F[1];
 				}
 			}
 			close INF;
 		}
 	}
-
-	print "[".localtime()."] \n";
-	print "[".localtime()."] Done with SV data\n";
-	print "[".localtime()."] \n";
+ 
+	print "##\n";
+	print "##_Done_with_SV_data\n";
+	print "##\n";
 }
 
 
