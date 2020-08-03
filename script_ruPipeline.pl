@@ -2,11 +2,11 @@
 
 use strict;
 use Getopt::Std;
-use String::ShellQuote qw( shell_quote );
+#use String::ShellQuote qw( shell_quote );
 
 ## Command-line options + usage statement
 my %opts;
-getopts('t:s:adhmnqv', \%opts); # Values in %opts
+getopts('t:s:adhmnrqv', \%opts); # Values in %opts
 
 if ($opts{'h'} || !$opts{'t'}) {
 print "
@@ -35,6 +35,7 @@ print "
 		Variants:
 		-v	Call variants with longshot, annotate with VEP, and put low freq variants through spliceai
 		-m	Call structural variants with Sniffles and SVIM
+		-r	Report variants (list options ... )
 
 		Future/Other:
 		#-?	Assemble target region from sample sheet
@@ -94,6 +95,8 @@ foreach my $foo (split /\,/, $geneData) {
 	$geneList{$D[0]}{"gene"} = "";
 	$geneList{$D[0]}{"targetRegion"} = "";
 	$geneList{$D[0]}{"regionToAnalyze"} = "$D[1]:$D[2]-$D[3]";
+	$geneList{$D[0]}{"regionStart"} = "$D[2]";
+	$geneList{$D[0]}{"regionEnd"}   = "$D[3]";
 	$geneList{$D[0]}{"chr"} = "$D[1]";
 	++$geneCount;
 
@@ -111,9 +114,6 @@ print "\n";
 my $out_fastqFileStats	= "$sampleName.$readVer.fastq.stats";
 my $out_finalBam	= "$sampleName.$readVer.bam";
 my $out_finalBam_ngmlr	= "$sampleName.$readVer.ngmlr.bam";
-#my $out_longshotBam	= "$sampleName.$readVer.longshot.$geneListForFileName.bam";
-my $out_longshotBamH1	= "$sampleName.$readVer.longshot.H1.bam";
-my $out_longshotBamH2	= "$sampleName.$readVer.longshot.H2.bam";
 my $out_depthOfCoverage	= "$sampleName.$readVer.coverage.10kb.tsv";
 
 ## Global Data
@@ -250,6 +250,7 @@ if ($opts{'d'} && -e $out_finalBam) {
 if ($opts{'m'}) { 
 	my $out_sniffles_minimap2 = "$sampleName-out_sv_sniffles_minimap2.vcf";
 	my $out_sniffles_ngmlr    = "$sampleName-out_sv_sniffles_ngmlr.vcf";
+	my $snifflesPath = "/home/dem/bin/Sniffles-1.0.12/bin/sniffles-core-1.0.11/sniffles";
 
 	my $cmd = "mkdir -p sniffles";
 	executeCommand($cmd);
@@ -265,7 +266,7 @@ if ($opts{'m'}) {
 		}
 
 		print "[".localtime(time)."] RUN: running sniffles on $bamForSniffles.\n";
-		executeCommand("sniffles -m $bamForSniffles -v sniffles/$out_sniffles_minimap2");
+		executeCommand("$snifflesPath -m $bamForSniffles -v sniffles/$out_sniffles_minimap2");
 
 		print "[".localtime(time)."] RUN: running svim on $bamForSniffles.\n";
 		executeCommand("svim alignment --read_names --sequence_alleles --insertion_sequences --sample $sampleName svim_minimap2 $out_finalBam $refGenome");
@@ -287,7 +288,7 @@ if ($opts{'m'}) {
 		}
 
 		print "[".localtime(time)."] RUN: running sniffles on $bamForSniffles.\n";
-		executeCommand("sniffles -m $bamForSniffles -v sniffles/$out_sniffles_ngmlr");
+		executeCommand("$snifflesPath -m $bamForSniffles -v sniffles/$out_sniffles_ngmlr");
 
 		print "[".localtime(time)."] RUN: running svim on $out_finalBam_ngmlr.\n";
 		executeCommand("svim alignment --read_names --sequence_alleles --insertion_sequences --sample $sampleName svim_ngmlr $out_finalBam_ngmlr $refGenome");
@@ -306,10 +307,17 @@ if ($opts{'m'}) {
 ## ------------- ##
 
 if ($opts{'v'}) { 
-	my $cmd = "mkdir -p variants";
-	executeCommand($cmd);
 
-	## first grab the vcfAnno toml template
+	## Make each output directory
+	my $longshotDir = "variant_longshot";
+	my $clairDir    = "variant_clair";
+	my $medakaDir   = "variant_medaka";
+
+	foreach my $blah ($longshotDir, $clairDir, $medakaDir) {
+		executeCommand("mkdir -p $blah");
+	}
+
+	## Grab the vcfAnno toml template
 	my $vcfAnnoTemplate;
 	open INF,"$vcfAnnoTemplateLoc";
 	while (<INF>) {
@@ -317,59 +325,135 @@ if ($opts{'v'}) {
 	}
 	close INF;
 
-	## make a new out_forSpliceAI file with the correct header
-	my $out_vcfForSpliceAI = "variants/spliceai.in";
-	my $out_spliceAIFinalOut = "variants/spliceai.out";
-	my $out_variantListForSpliceAI;
-	my $cmd = "cp $spliceaiTemplateLoc ./variants/spliceai.in";
-	executeCommand($cmd);
+	## subroutine to grab low freq alleles in each round of variant calling
+	my(%variantDetail);
+	sub filterVariantVCFFile {
+		my($vcf,$caller) = ($_[0],$_[1]);
 
-	## for every gene of interest run longshot and annotate
-	foreach my $gene (keys %geneList) {
-		my $out_longshotBam   = "variants/$sampleName.$readVer.longshot.$gene.bam";
-		my $out_longshotVCF   = "variants/$sampleName.$readVer.longshot.$gene.vcf";
-		my $out_longshotVCFAF = "variants/$sampleName.$readVer.longshot.$gene.AF.VEP.vcf";
-
-		my $longshotCmd = "longshot -A --strand_bias_pvalue_cutoff -y 30 -r $geneList{$gene}{'regionToAnalyze'} -O $out_longshotBam --bam $out_finalBam --ref $refGenome --out $out_longshotVCF"; 
-		executeCommand($longshotCmd);
-
-		# need to make new vcfAnno file
-		my $chr = $geneList{$gene}{"chr"};
-		   $chr =~ s/chr//;
-		my $tmp_vcfAnnoTemplate = $vcfAnnoTemplate;
-		$tmp_vcfAnnoTemplate =~ s/\<chr\>/$chr/;
-
-		open OUTF,">variants/vcfAnno.conf.toml";
-		print OUTF $tmp_vcfAnnoTemplate;
-		close OUTF;
-
-		my $vcfannoCmd = "vcfanno variants/vcfAnno.conf.toml $out_longshotVCF > $out_longshotVCFAF"; 
-		executeCommand($vcfannoCmd);
-		
-		open INF,"$out_longshotVCFAF";
+		open INF,"$vcf";
 		while (<INF>) {
 			chomp($_);
 			next if $_ =~ /^\#/;
+			next if $_ =~ /LowQual/ && $caller eq "clair"; # clair calls everything, so the low quality calls are not valuable
 
-			my($gnomadAF) = $_ =~ /\;gnomad_AF\=(\S+)\;/;
+			my($gnomadAF) = $_ =~ /gnomad_AF\=(\S+)\;/;
 			next if $gnomadAF > 0.02;
 
-			$gnomadAF = "-" if !$gnomadAF;
+			$gnomadAF = 0 if !$gnomadAF;
 			my(@F) = split /\t/, $_;
-			$out_variantListForSpliceAI .= "$F[0]\t$F[1]\t.\t$F[3]\t$F[4]\t$gnomadAF\t.\t.\n";
+			#$out_variantListForSpliceAI .= "$F[0]\t$F[1]\t.\t$F[3]\t$F[4]\t$gnomadAF\t$caller\t.\n";
+
+			my $key = "$F[0]|$F[1]|$F[3]|$F[4]";
+#print "$F[0]\t$F[1]\t$F[3]\t$F[4]\t$gnomadAF\t$caller\n";
+			$variantDetail{$key}{"caller"} .= "$caller,";
+			$variantDetail{$key}{"AF"} = $gnomadAF;
+
+#print "\thash_caller: $variantDetail{$key}{'caller'}\n";
+#print "\thash_af:     $variantDetail{$key}{'AF'}\n";
+		}
+		return 1;
+	}
+
+	## for every gene of interest run longshot, medaka, and clair then annotate their vcf files
+	foreach my $aligner ("minimap2","ngmlr") {
+		my $variantBam = $out_finalBam; # this is the minimap2 bam
+		   $variantBam = $out_finalBam_ngmlr if $aligner eq "ngmlr";
+
+		foreach my $gene (keys %geneList) {
+			# need to make new vcfAnno file
+			my $chr = $geneList{$gene}{"chr"};
+		   	$chr =~ s/chr//;
+			my $tmp_vcfAnnoTemplate = $vcfAnnoTemplate;
+			$tmp_vcfAnnoTemplate =~ s/\<chr\>/$chr/;
+
+			open OUTF,">vcfAnno.conf.toml";
+			print OUTF $tmp_vcfAnnoTemplate;
+			close OUTF;
+
+			## -------- ##
+			## LONGSHOT ##
+			## -------- ##
+
+			my $out_longshotBam   = "$longshotDir/$sampleName.$readVer.longshot.$aligner.$gene.bam";
+			my $out_longshotVCF   = "$longshotDir/$sampleName.$readVer.longshot.$aligner.$gene.vcf";
+			my $out_longshotVCFAF = "$longshotDir/$sampleName.$readVer.longshot.$aligner.$gene.AF.VEP.vcf";
+
+			my $longshotCmd = "longshot -A --strand_bias_pvalue_cutoff -y 30 -r $geneList{$gene}{'regionToAnalyze'} -O $out_longshotBam --bam $variantBam --ref $refGenome --out $out_longshotVCF"; 
+			executeCommand($longshotCmd);
+			executeCommand("vcfanno vcfAnno.conf.toml $out_longshotVCF > $out_longshotVCFAF");
+			filterVariantVCFFile($out_longshotVCFAF,"longshot_$aligner");
+		
+			## ------ ##
+			## MEDAKA ##
+			## ------ ##
+
+			my $out_medakaVCFAF = "$medakaDir/$sampleName.$readVer.medaka.$aligner.$gene.AF.VEP.vcf";
+	
+			my $cmd  = "\#!/bin/bash\nsource /home/dem/miniconda3/etc/profile.d/conda.sh\n";
+		   	$cmd .= "source activate medaka\n";
+		   	$cmd .= "medaka_variant -i $variantBam -f $refGenome -o $medakaDir/$aligner/$gene -t $threads -r $geneList{$gene}{'regionToAnalyze'}\n";
+
+			open OUTF,">medaka.sh";
+			print OUTF $cmd;
+			close OUTF;
+
+			executeCommand("bash medaka.sh");
+			executeCommand("vcfanno vcfAnno.conf.toml $medakaDir/$aligner/$gene/round_1.vcf > $out_medakaVCFAF");
+			filterVariantVCFFile($out_medakaVCFAF,"medaka_$aligner");
+
+			## ----- ##
+			## CLAIR ##
+			## ----- ##
+
+			my $out_clairVCFAF = "$clairDir/$sampleName.$readVer.clair.$aligner.$gene.AF.VEP.vcf";
+	
+			my $cmd  = "\#!/bin/bash\nsource /home/dem/miniconda3/etc/profile.d/conda.sh\n";
+		   	$cmd .= "source activate clair-env\n";
+		   	$cmd .= "clair.py callVarBam --chkpnt_fn /home/dem/ont/model --bam_fn $variantBam --ref_fn $refGenome --call_fn $clairDir/$gene.$aligner.vcf --sampleName $gene --pysam_for_all_indel_bases --threads $threads --qual 100 --ctgName chr$chr --ctgStart $geneList{$gene}{'regionStart'} --ctgEnd $geneList{$gene}{'regionEnd'}";
+	
+			open OUTF,">clair.sh";
+			print OUTF $cmd;
+			close OUTF;
+
+			executeCommand("bash clair.sh");
+			executeCommand("vcfanno vcfAnno.conf.toml $clairDir/$gene.$aligner.vcf > $out_clairVCFAF");
+			filterVariantVCFFile($out_clairVCFAF,"clair_$aligner");
 		}
 	}
-	#$out_variantListForSpliceAI =~ s/\n$//;
-	$out_variantListForSpliceAI =~ s/chr//g;
+
+	## Remove temporary files
+	executeCommand("rm -f medaka.sh clair.sh vcfAnno.conf.toml");
+
+	## Run spliceai
+	my $out_variantListForSpliceAI;
+	foreach my $foo (keys %variantDetail) {
+		my($chr,$pos,$ref,$alt) = $foo =~ /(\S+)\|(\d+)\|(\S+)\|(\S+)/;
+		my $af      = $variantDetail{$foo}{"AF"};
+		my $callers = $variantDetail{$foo}{"caller"};
+
+		$callers =~ s/\,$//g;
+		my $callerCount;
+		foreach (split /\,/, $callers) { ++$callerCount; }
+
+		##INFO=<ID=AF,Number=A,Type=Float,Description="Allele Frequency">
+		##INFO=<ID=CC,Number=1,Type=Integer,Description="Caller Count">
+		##INFO=<ID=CL,Number=1,Type=String,Description="Caller List">
+		#CHROM	POS	ID	REF	ALT	INFO
+
+		$chr =~ s/chr//;
+		$out_variantListForSpliceAI .= "$chr\t$pos\t.\t$ref\t$alt\tAF=$af;CC=$callerCount;CL=$callers\n";
+	}
+
+	## make a new out_forSpliceAI file with the correct header
+	my $out_vcfForSpliceAI = "spliceai.in";
+	my $out_spliceAIFinalOut = "spliceai.out";
+	executeCommand("cp $spliceaiTemplateLoc ./spliceai.in");
 
 	open OUTF,">>$out_vcfForSpliceAI";
 	print OUTF $out_variantListForSpliceAI;
 	close OUTF;
 
-	# once done, run spliceai
-	my $spliceaiCmd = "spliceai -I $out_vcfForSpliceAI -O $out_spliceAIFinalOut -R $refGenome -A grch38";
-	executeCommand($spliceaiCmd);
-
+	executeCommand("spliceai -I $out_vcfForSpliceAI -O $out_spliceAIFinalOut -R $refGenome -A grch38");
 }
 
 
@@ -377,42 +461,150 @@ if ($opts{'v'}) {
 ## Summarize variants from target regions ##
 ## -------------------------------------- ##
 
-if ($opts{'z'}) {
-# per gene
-# SNVs
-# spliceAI
-# cat spliceai.out | grep -v "#" | awk -F"|" '{ if ($3 > .2 || $4 > .2 || $5 > .2 || $6 > .2) print}'
+if ($opts{'r'}) {
+	my $spliceaiCutoff	= 0.5;
+	my(%geneTargets,%coverage);
+
+	my $in_spliceai		= "spliceai.in";
+	my $out_spliceai	= "spliceai.out";
+	my $out_sniffles_minimap2 = "sniffles/$sampleName\-out_sv_sniffles_minimap2.vcf";
+	my $out_sniffles_ngmlr 	  = "sniffles/$sampleName\-out_sv_sniffles_ngmlr.vcf";
+	my $out_svim_minimap2 	= "svim_minimap2/variants.vcf";
+	my $out_svim_ngmlr    	= "svim_ngmlr/variants.vcf";
+
+	open INF,"/n/projects/targetedLongReadSeq/sequencingTargets/hg38.genePos.tsv" or die "can't open file: $!";
+	while (<INF>) {
+		chomp($_);
+		my(@F) = split /\t/, $_;
+
+		next unless $geneList{$F[1]};
+
+		$geneTargets{$F[1]} = "$F[0]:$F[3]-$F[4]";
+	
+		#print "$F[1]\t$F[0]:$F[3]-$F[4]\n";
+	}
+	close INF;
+
+	## Coverage ##
+	if (-e "$sampleName.coverage.1kbwindow.tsv") {
+		foreach my $gene (keys %geneTargets) {
+			my($chr,$start,$end) = $geneTargets{$gene} =~ /(\S+)\:(\d+)\-(\d+)/;
+			`cat $sampleName.coverage.1kbwindow.tsv | grep $chr > tmp.out`;
+
+			my($totalCov,$covCount);
+			open INF,"tmp.out" or die "can't open file: $!";
+			while (<INF>) {
+				chomp($_);
+				my(@D) = split /\t/, $_;
+				next unless $D[1] >= $start && $D[1] <= $end;
+				++$covCount;
+				$totalCov += $D[2];
+			}
+			close INF;
+			my $aveCov = sprintf("%0.0f", $totalCov/$covCount);
+			$coverage{$gene} = $aveCov;
+			#print "$gene\t$aveCov\n";
+			`rm -f tmp.out`;
+		}
+	} else {
+		print "Can't calc coverage as $sampleName.Coverage.1kbwindow.tsv is missing\n";
+	}
+
+	print "[".localtime()."] SUMMARY DATA\n";
+	foreach my $gene (keys %geneTargets) {
+		my($chr,$start,$end) = $geneTargets{$gene} =~ /(\S+)\:(\d+)\-(\d+)/;
+		print "$gene\t$coverage{$gene}\t$geneTargets{$gene}\t$chr\t$start\t$end\t$geneList{$gene}{'regionToAnalyze'}\n";
+	}
+	print "[".localtime()."] \n";
 
 
-# SVIM
-#   | awk '$1 ~ /chr6/' | awk '{if($2>30900000) print}' | awk '{if($2<30930000) print}' | awk '{if($6>6) print}' |
+	## spliceAI output ##
+
+		# 2. SNVs -> spliceAI result + AF + caller + coverage
+ 		# indels -> spliceAI result + AF + caller + coverage
+ 		# cat spliceai.out | grep -v "#" | awk -F"|" '{ if ($3 > .2 || $4 > .2 || $5 > .2 || $6 > .2) print}'
+
+	print "[".localtime()."] Pulling data from spliceAI\n";
+
+	my %spliceaiin;
+	open INF,"$in_spliceai";
+	while (<INF>) {
+		next if $_ =~ /^#/;
+		chomp($_);
+		my(@F) = split /\t/, $_;
+		next unless $F[5] =~ /AF/;
+		my($callers) = $F[5] =~ /CL\=(\S+)/;
+		my($af)      = $F[5] =~ /AF\=(\S+)\;CC/;
+
+		$spliceaiin{$F[0]}{$F[1]}{$F[3]}{$F[4]} = "$af\t$callers";
+	}
+	close INF;
+
+	open INF,"$out_spliceai";
+	while (<INF>) {
+		next if $_ =~ /^#/;
+		chomp($_);
+		my(@F) = split /\t/, $_;
+		next unless $F[7] =~ /SpliceAI/;
+		my($spliceAIout) = $F[7] =~ /SpliceAI\=(.+)/;
+	
+		foreach my $foo (split /\,/, $spliceAIout) {
+			my(@D) = split /\|/, $foo;
+			my $gene = $D[1];
+
+			next unless $geneList{$D[1]};
+
+			my $skip = 1;
+			$skip = 0 if $D[2] >= $spliceaiCutoff;
+			$skip = 0 if $D[3] >= $spliceaiCutoff;
+			$skip = 0 if $D[4] >= $spliceaiCutoff;
+			$skip = 0 if $D[5] >= $spliceaiCutoff;
+
+			next if $skip == 1;
+
+			print "$gene\tchr$F[0]:$F[1]\t$_\t$spliceaiin{$F[0]}{$F[1]}{$F[3]}{$F[4]}\n";
+		}
+	}
+	close INF;
+	print "[".localtime()."] \n";
+	print "[".localtime()."] SpliceAI done\n";
+	print "[".localtime()."] \n";
 
 
-	#foreach my $gene (keys %geneList) {
-		
-		#open INF,"$out_longshotVCFAF";
-		#while (<INF>) {
-			#chomp($_);
-			#next if $_ =~ /^\#/;
-#
-			#my($gnomadAF) = $_ =~ /\;gnomad_AF\=(\S+)\;/;
-			#next if $gnomadAF > 0.02;
-#
-			#$gnomadAF = "-" if !$gnomadAF;
-			#my(@F) = split /\t/, $_;
-			#$out_variantListForSpliceAI .= "$F[0]\t$F[1]\t.\t$F[3]\t$F[4]\t$gnomadAF\t.\t.\n";
-		#}
-	#}
-	##$out_variantListForSpliceAI =~ s/\n$//;
-	#$out_variantListForSpliceAI =~ s/chr//g;
-#
-	#open OUTF,">>$out_vcfForSpliceAI";
-	#print OUTF $out_variantListForSpliceAI;
-	#close OUTF;
+	# 3. SVs: list events
+
+
+	## SVs ##
+
+	foreach my $gene (keys %geneList) {
+		print "[".localtime()."] SUMMARY: SV data for $gene\n";
+		my $chr = $geneList{$gene}{'chr'};
+		my $targetStart = $geneList{$gene}{'regionStart'};
+		my $targetEnd   = $geneList{$gene}{'regionEnd'};
+
+		foreach my $svFile ($out_sniffles_minimap2,$out_sniffles_ngmlr,$out_svim_minimap2,$out_svim_ngmlr) {
+			
+			open INF,"$svFile" or die "can't open $svFile: $!";
+			while (<INF>) {
+				next if $_ =~ /^#/;
+				chomp($_);
+				my(@F) = split /\t/, $_;
+				next unless $chr eq $F[0];
+				next if $F[5] <= 2 && $svFile =~ /svim/;
+	
+				foreach my $pos ($targetStart..$targetEnd) {
+					print "$gene\t$chr:$pos\t$svFile\t$_\n" if $pos == $F[1];
+				}
+			}
+			close INF;
+		}
+	}
+
+	print "[".localtime()."] \n";
+	print "[".localtime()."] Done with SV data\n";
+	print "[".localtime()."] \n";
 }
 
-## ----------- ##
-## Subroutines ##
 
 ## ----------- ##
 ## Subroutines ##

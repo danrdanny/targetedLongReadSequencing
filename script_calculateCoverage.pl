@@ -67,20 +67,20 @@ foreach my $chr (@chr) {
 ## ------------------------------------------ ##
 
 my $finalOutputHeader = "chr\tpos\tcount";
-my $finalCoverageFile = "$samplePrefix.coverage.10kbwindow.tsv";
+my $finalCoverageFile = "$samplePrefix.coverage.1kbwindow.tsv";
 `echo \"$finalOutputHeader\" > $finalCoverageFile`;
 
 print "[".localtime(time)."] \n";
 print "[".localtime(time)."] Consolidating data.\n";
 foreach my $chr (@chr) {
 	next unless $chr =~ /^chr/;
-	my $windowFile = "$tmpScriptDir/$chr.depthOfCoverage.10kbWindows.tsv";
+	my $windowFile = "$tmpScriptDir/$chr.depthOfCoverage.1kbWindows.tsv";
 
 	if (!-e $windowFile) {
 		print "[".localtime(time)."] WARNING: $chr depth of coverage file missing\n";
 	}
 
-	`cat $tmpScriptDir/$chr.depthOfCoverage.10kbWindows.tsv >> $finalCoverageFile`;
+	`cat $tmpScriptDir/$chr.depthOfCoverage.1kbWindows.tsv >> $finalCoverageFile`;
 }
 
 # Delete data
@@ -114,8 +114,8 @@ sub binCoverage {
 	foreach my $chr (sort keys %totalDepth) {
 		my $aveDepth = sprintf("%0.1f", $totalDepth{$chr} / $totalDepthCount{$chr});
 		my $min         = 0; #$chrMin{$chr};
-		my $max         = $min + 10000;
-		my $step        = 10000;
+		my $max         = $min + 1000;
+		my $step        = 1000;
 
 		until ($min >= $chrMax{$chr}) {
 			my($totalDepth,$count);
@@ -140,7 +140,7 @@ sub binCoverage {
 		}
 	}
 
-	open OUTF,">$tmpScriptDir/$chr.depthOfCoverage.10kbWindows.tsv";
+	open OUTF,">$tmpScriptDir/$chr.depthOfCoverage.1kbWindows.tsv";
 	print OUTF $output;
 	close OUTF;
 }
